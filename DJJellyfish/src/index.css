@@ -5,7 +5,12 @@
 }
 
 body {
-  background: #0d0820;
+  background-color: #050d18;
+  background-image: url('/hero.jpg');
+  background-size: cover;
+  background-position: center top;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
   color: #f0eeff;
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   min-height: 100vh;
@@ -14,4 +19,12 @@ body {
 
 #root {
   min-height: 100vh;
+  /* Dark gradient overlay — light at top so jellyfish shows, heavier below for readability */
+  background: linear-gradient(
+    to bottom,
+    rgba(4, 10, 22, 0.45) 0%,
+    rgba(4, 10, 22, 0.68) 30%,
+    rgba(4, 10, 22, 0.88) 65%,
+    rgba(4, 10, 22, 0.96) 100%
+  );
 }
