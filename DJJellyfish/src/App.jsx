@@ -69,6 +69,15 @@ export default function App() {
   useEffect(() => { segmentsRef.current = segments },   [segments])
   useEffect(() => { autotuneRef.current = autotuneOn }, [autotuneOn])
 
+  // ── Parallax background ───────────────────────────────────────────────
+  useEffect(() => {
+    const onScroll = () => {
+      document.body.style.backgroundPositionY = `${window.scrollY * 0.35}px`
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
   // Autotune
   const detectorRef   = useRef(null)
   const correctionRef = useRef(0)
