@@ -298,20 +298,37 @@ export default function App() {
         await um.open()
         finnUserMediaRef.current = um
 
-        // Waveform analyser for pitchy detection — purely a read tap, no output
+        // Disable AGC + noise suppression on the mic track.
+        // AGC is the main cause of "fade-out on sustained notes" — the browser
+        // detects a loud sustained signal and silently reduces mic gain.
+        // Noise suppression also mangles musical pitches.
+        try {
+          const track = um.stream?.getAudioTracks?.()?.[0]
+          if (track) await track.applyConstraints({
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          })
+        } catch (_) { /* applyConstraints unsupported — continue */ }
+
+        // Waveform analyser for pitchy detection — read tap, no downstream
         const analyser = new Tone.Analyser('waveform', 2048)
         finnAnalyserRef.current = analyser
 
-        // windowSize 0.05s = shorter grains → more robotic phasing artifacts
-        const ps  = new Tone.PitchShift({ pitch: 0, windowSize: 0.05 })
-        const wet = new Tone.Gain(0)   // starts silent; set to 1 when active
+        // windowSize 0.4s = large grains → smooth crossfades, no static clicks,
+        // stable amplitude on sustained notes (~400ms processing latency)
+        const ps      = new Tone.PitchShift({ pitch: 0, windowSize: 0.4 })
+        // +6 dB makeup gain so the pitch-shifted voice sounds full and present
+        const makeup  = new Tone.Gain(2.0)
+        const wet     = new Tone.Gain(0)   // master wet: 0=off, 1=on
         finnPsRef.current   = ps
         finnGainRef.current = wet
 
-        // Pure Tone-to-Tone connections — no raw AudioNode bridging
-        um.connect(analyser)   // detection tap (analyser has no downstream connection)
+        // All Tone-to-Tone connections
+        um.connect(analyser)   // detection tap
         um.connect(ps)         // processing path
-        ps.connect(wet)
+        ps.connect(makeup)
+        makeup.connect(wet)
         wet.toDestination()
 
         finnDetectorRef.current = PitchDetector.forFloat32Array(2048)
@@ -351,7 +368,9 @@ export default function App() {
     let lastShift = 0
 
     const loop = () => {
-      const data = finnAnalyserRef.current.getValue()  // Float32Array via Tone.Analyser
+      // getValue() returns Float32Array (mono) or Float32Array[] (multi-ch) — unwrap if needed
+      const raw  = finnAnalyserRef.current.getValue()
+      const data = raw instanceof Float32Array ? raw : raw[0]
       const [freq, clarity] = finnDetectorRef.current.findPitch(data, sr)
       if (clarity > 0.65 && freq > 60 && freq < 1200) {
         lastShift = snapToPentatonic(12 * Math.log2(freq / 440))
