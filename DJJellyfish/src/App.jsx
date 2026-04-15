@@ -83,17 +83,19 @@ export default function App() {
   const detectorRef   = useRef(null)
   const correctionRef = useRef(0)
 
-  // Finn Party Mode — 3-voice auto-harmonizer (all Tone.js native)
-  const finnUserMediaRef = useRef(null)   // Tone.UserMedia
-  const finnAnalyserRef  = useRef(null)   // Tone.Analyser (waveform, for pitchy)
-  const finnPs1Ref       = useRef(null)   // Tone.PitchShift — root voice
-  const finnPs2Ref       = useRef(null)   // Tone.PitchShift — fifth (+7st)
-  const finnPs3Ref       = useRef(null)   // Tone.PitchShift — octave (+12st)
-  const finnReverbRef    = useRef(null)   // Tone.Reverb
-  const finnGainRef      = useRef(null)   // Tone.Gain (wet: 0=off, 1=on)
-  const finnDetectorRef  = useRef(null)   // pitchy PitchDetector
-  const finnRafRef       = useRef(null)   // rAF loop id
-  const finnModeRef      = useRef(false)  // mirror of finnMode for callbacks
+  // Finn Party Mode
+  const finnUserMediaRef   = useRef(null)  // raw MediaStream (getUserMedia)
+  const finnAnalyserRef    = useRef(null)  // Tone.Analyser — pitch detection tap
+  const finnPs1Ref         = useRef(null)  // Tone.PitchShift
+  const finnPs2Ref         = useRef(null)  // (unused — reserved)
+  const finnPs3Ref         = useRef(null)  // (unused — reserved)
+  const finnReverbRef      = useRef(null)  // Tone.Filter (HPF) — reused slot
+  const finnBitcrusherRef  = useRef(null)  // Tone.BitCrusher — lo-fi grit
+  const finnGainRef        = useRef(null)  // Tone.Gain (wet gate: 0=off, 1=on)
+  const finnRecDestRef     = useRef(null)  // MediaStreamDestinationNode — for recording
+  const finnDetectorRef    = useRef(null)  // pitchy PitchDetector
+  const finnRafRef         = useRef(null)  // rAF loop id
+  const finnModeRef        = useRef(false) // mirror of finnMode for callbacks
   useEffect(() => { finnModeRef.current = finnMode }, [finnMode])
 
   // Tracks
@@ -105,12 +107,25 @@ export default function App() {
   // ══════════════════════════════════════════════════════════════════════════
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      streamRef.current = stream
+      let stream
 
-      const ctx     = new AudioContext()
+      if (finnModeRef.current && finnRecDestRef.current) {
+        // ── Finn Party Mode recording ──────────────────────────────────────
+        // Capture the already-processed Finn output (pitch-shifted, bit-crushed,
+        // filtered) rather than the raw mic — records what you actually hear.
+        stream = finnRecDestRef.current.stream
+        // Don't mute finn gain — user needs to hear themselves to perform
+      } else {
+        // ── Normal recording ───────────────────────────────────────────────
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        streamRef.current = stream
+        // Silence finn monitoring to prevent feedback with a second open mic
+        if (finnGainRef.current) finnGainRef.current.gain.value = 0
+      }
+
+      // Tap stream into an analyser for the live waveform display
+      const ctx = new AudioContext()
       recCtxRef.current = ctx
-
       const src     = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 2048
@@ -131,7 +146,7 @@ export default function App() {
         recAnalyserRef.current = null
         recCtxRef.current?.close()
 
-        // Decode for static waveform display
+        // Decode for static waveform + editor
         const ab  = await blob.arrayBuffer()
         const ac  = new AudioContext()
         const buf = await ac.decodeAudioData(ab)
@@ -139,9 +154,6 @@ export default function App() {
         setAudioBuffer(buf)
         setWaveformData(buildStaticWaveform(buf))
       }
-
-      // Silence finn monitoring while recording to prevent feedback
-      if (finnGainRef.current) finnGainRef.current.gain.value = 0
 
       rec.start(100)
       setIsRecording(true)
@@ -152,9 +164,12 @@ export default function App() {
 
   const stopRecording = () => {
     if (mediaRecRef.current?.state !== 'inactive') mediaRecRef.current?.stop()
-    streamRef.current?.getTracks().forEach(t => t.stop())
+    // Only stop mic tracks for normal recording — Finn's stream belongs to its chain
+    if (!finnModeRef.current) {
+      streamRef.current?.getTracks().forEach(t => t.stop())
+    }
     setIsRecording(false)
-    // Restore finn monitoring now that recording mic is closed
+    // Restore finn monitoring if it was muted for normal recording
     if (finnModeRef.current && finnGainRef.current) finnGainRef.current.gain.value = 1
   }
 
@@ -326,22 +341,32 @@ export default function App() {
         const ps1 = new Tone.PitchShift({ pitch: 0, windowSize: 0.03 })
         finnPs1Ref.current = ps1
 
-        // High-pass filter at 150 Hz — cuts low rumble, gives processed
-        // 'robot speaker' timbre (per Adventure Time Finn stomach-computer ref)
-        const hpf    = new Tone.Filter(150, 'highpass')
+        // BitCrusher(4) — 4-bit depth quantization, adds 8-bit digital grit
+        // Gives the "Finn's stomach computer" lo-fi crunchy character
+        const crusher = new Tone.BitCrusher(4)
+        finnBitcrusherRef.current = crusher
+
+        // High-pass filter at 150 Hz — cuts low rumble, robot speaker timbre
+        const hpf = new Tone.Filter(150, 'highpass')
         finnReverbRef.current = hpf   // reuse unused ref slot
 
-        // Heavy makeup gain — pitch shifting loses energy; compensate loudly
+        // Heavy makeup gain + master wet gate
         const makeup = new Tone.Gain(8.0)
-        const wet    = new Tone.Gain(0)   // master on/off gate
+        const wet    = new Tone.Gain(0)
         finnGainRef.current = wet
 
-        bridge.connect(analyser)   // Tone.Gain → Tone.Analyser ✓
-        bridge.connect(ps1)        // Tone.Gain → Tone.PitchShift ✓
-        ps1.connect(hpf)
+        // MediaStreamDestinationNode — tap processed audio for recording
+        const recDest = Tone.getContext().rawContext.createMediaStreamDestination()
+        finnRecDestRef.current = recDest
+
+        bridge.connect(analyser)   // pitch detection tap
+        bridge.connect(ps1)
+        ps1.connect(crusher)
+        crusher.connect(hpf)
         hpf.connect(makeup)
         makeup.connect(wet)
         wet.toDestination()
+        wet.connect(recDest)       // also feed recording output
 
         finnDetectorRef.current = PitchDetector.forFloat32Array(2048)
       } catch (err) {
@@ -414,8 +439,7 @@ export default function App() {
       finnUserMediaRef.current?.getTracks?.().forEach(t => t.stop())
       finnAnalyserRef.current?.dispose()
       finnPs1Ref.current?.dispose()
-      finnPs2Ref.current?.dispose()
-      finnPs3Ref.current?.dispose()
+      finnBitcrusherRef.current?.dispose()
       finnReverbRef.current?.dispose()
       finnGainRef.current?.dispose()
     }
