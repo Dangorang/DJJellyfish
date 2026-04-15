@@ -83,10 +83,13 @@ export default function App() {
   const detectorRef   = useRef(null)
   const correctionRef = useRef(0)
 
-  // Finn Party Mode — live mic pitch-quantizer chain (all Tone.js native)
+  // Finn Party Mode — 3-voice auto-harmonizer (all Tone.js native)
   const finnUserMediaRef = useRef(null)   // Tone.UserMedia
   const finnAnalyserRef  = useRef(null)   // Tone.Analyser (waveform, for pitchy)
-  const finnPsRef        = useRef(null)   // Tone.PitchShift
+  const finnPs1Ref       = useRef(null)   // Tone.PitchShift — root voice
+  const finnPs2Ref       = useRef(null)   // Tone.PitchShift — fifth (+7st)
+  const finnPs3Ref       = useRef(null)   // Tone.PitchShift — octave (+12st)
+  const finnReverbRef    = useRef(null)   // Tone.Reverb
   const finnGainRef      = useRef(null)   // Tone.Gain (wet: 0=off, 1=on)
   const finnDetectorRef  = useRef(null)   // pitchy PitchDetector
   const finnRafRef       = useRef(null)   // rAF loop id
@@ -298,10 +301,8 @@ export default function App() {
         await um.open()
         finnUserMediaRef.current = um
 
-        // Disable AGC + noise suppression on the mic track.
-        // AGC is the main cause of "fade-out on sustained notes" — the browser
-        // detects a loud sustained signal and silently reduces mic gain.
-        // Noise suppression also mangles musical pitches.
+        // Disable AGC/noiseSuppression so the browser doesn't fade out
+        // sustained notes or mangle musical pitches.
         try {
           const track = um.stream?.getAudioTracks?.()?.[0]
           if (track) await track.applyConstraints({
@@ -311,23 +312,42 @@ export default function App() {
           })
         } catch (_) { /* applyConstraints unsupported — continue */ }
 
-        // Waveform analyser for pitchy detection — read tap, no downstream
+        // Detection tap — read only, no downstream connection
         const analyser = new Tone.Analyser('waveform', 2048)
         finnAnalyserRef.current = analyser
 
-        // windowSize 0.4s = large grains → smooth crossfades, no static clicks,
-        // stable amplitude on sustained notes (~400ms processing latency)
-        const ps      = new Tone.PitchShift({ pitch: 0, windowSize: 0.4 })
-        // +6 dB makeup gain so the pitch-shifted voice sounds full and present
-        const makeup  = new Tone.Gain(2.0)
-        const wet     = new Tone.Gain(0)   // master wet: 0=off, 1=on
-        finnPsRef.current   = ps
+        // ── 3-voice harmonizer ─────────────────────────────────────────
+        // Voice 1: root   (snapped to C major scale)
+        // Voice 2: fifth  (root + 7 semitones)
+        // Voice 3: octave (root + 12 semitones)
+        // windowSize 0.4s = large grains → no static, stable sustained notes
+        const ps1 = new Tone.PitchShift({ pitch: 0,  windowSize: 0.4 })
+        const ps2 = new Tone.PitchShift({ pitch: 7,  windowSize: 0.4 })
+        const ps3 = new Tone.PitchShift({ pitch: 12, windowSize: 0.4 })
+        finnPs1Ref.current = ps1
+        finnPs2Ref.current = ps2
+        finnPs3Ref.current = ps3
+
+        // Per-voice gains: root full, fifth half, octave third
+        const g1 = new Tone.Gain(1.0)
+        const g2 = new Tone.Gain(0.55)
+        const g3 = new Tone.Gain(0.35)
+
+        // Lush reverb tail to glue the three voices and make it feel musical
+        const reverb = new Tone.Reverb({ decay: 2.8, wet: 0.5, preDelay: 0.02 })
+        finnReverbRef.current = reverb
+
+        // Heavy makeup gain (+12 dB) — pitch shifting loses energy; crank it up
+        const makeup = new Tone.Gain(4.0)
+        const wet    = new Tone.Gain(0)   // master on/off
         finnGainRef.current = wet
 
-        // All Tone-to-Tone connections
-        um.connect(analyser)   // detection tap
-        um.connect(ps)         // processing path
-        ps.connect(makeup)
+        // Wire it all up
+        um.connect(analyser)          // detection tap (no output)
+        um.connect(ps1); ps1.connect(g1); g1.connect(reverb)
+        um.connect(ps2); ps2.connect(g2); g2.connect(reverb)
+        um.connect(ps3); ps3.connect(g3); g3.connect(reverb)
+        reverb.connect(makeup)
         makeup.connect(wet)
         wet.toDestination()
 
@@ -342,40 +362,44 @@ export default function App() {
     if (!isRecording) finnGainRef.current.gain.value = 1
     setFinnMode(true)
 
-    // ── Pitch quantization rAF loop ──────────────────────────────────────
-    // Snaps detected pitch to C major pentatonic (0,2,4,7,9 semitones from C).
-    // Gaps of 2-3 semitones mean corrections up to ~1.5st — clearly audible.
-    // Holds last correction between low-clarity frames (no snap-back to 0).
-    const PENTA = [0, 2, 4, 7, 9]
+    // ── Pitch quantization + harmonizer rAF loop ─────────────────────────
+    // Snaps voice to C major scale (7 notes — more choices, smoother movement)
+    // then sets all 3 PitchShifts so they stay harmonically locked:
+    //   ps1 = correction          (root, snapped note)
+    //   ps2 = correction + 7      (perfect fifth above root)
+    //   ps3 = correction + 12     (octave above root)
+    const MAJOR = [0, 2, 4, 5, 7, 9, 11]   // C major scale intervals
 
-    const snapToPentatonic = (semiFromA4) => {
+    const snapToMajor = (semiFromA4) => {
       const fromC  = semiFromA4 + 9       // A4 is 9st above C4
       const octave = Math.floor(fromC / 12)
       const pos    = fromC - octave * 12  // position within octave [0,12)
 
-      let best = PENTA[0], bestDist = Math.abs(pos - PENTA[0])
-      for (const n of PENTA) {
+      let best = MAJOR[0], bestDist = Math.abs(pos - MAJOR[0])
+      for (const n of MAJOR) {
         const d = Math.abs(pos - n)
         if (d < bestDist) { bestDist = d; best = n }
       }
       if (Math.abs(pos - 12) < bestDist) best = 12   // check next-octave C
 
       const targetFromA4 = (octave * 12 + best) - 9
-      return Math.max(-12, Math.min(12, targetFromA4 - semiFromA4))
+      return targetFromA4 - semiFromA4   // shift needed to hit the scale note
     }
 
     const sr = Tone.getContext().sampleRate
     let lastShift = 0
 
     const loop = () => {
-      // getValue() returns Float32Array (mono) or Float32Array[] (multi-ch) — unwrap if needed
       const raw  = finnAnalyserRef.current.getValue()
       const data = raw instanceof Float32Array ? raw : raw[0]
       const [freq, clarity] = finnDetectorRef.current.findPitch(data, sr)
-      if (clarity > 0.65 && freq > 60 && freq < 1200) {
-        lastShift = snapToPentatonic(12 * Math.log2(freq / 440))
+      if (clarity > 0.6 && freq > 60 && freq < 1200) {
+        lastShift = snapToMajor(12 * Math.log2(freq / 440))
       }
-      finnPsRef.current.pitch = lastShift   // hold between frames
+      // Drive all three voices — they stay a fifth and an octave above the root
+      finnPs1Ref.current.pitch = lastShift
+      finnPs2Ref.current.pitch = lastShift + 7
+      finnPs3Ref.current.pitch = lastShift + 12
       finnRafRef.current = requestAnimationFrame(loop)
     }
     finnRafRef.current = requestAnimationFrame(loop)
@@ -387,7 +411,10 @@ export default function App() {
       cancelAnimationFrame(finnRafRef.current)
       finnUserMediaRef.current?.close()
       finnAnalyserRef.current?.dispose()
-      finnPsRef.current?.dispose()
+      finnPs1Ref.current?.dispose()
+      finnPs2Ref.current?.dispose()
+      finnPs3Ref.current?.dispose()
+      finnReverbRef.current?.dispose()
       finnGainRef.current?.dispose()
     }
   }, [])
