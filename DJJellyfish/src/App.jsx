@@ -368,22 +368,24 @@ export default function App() {
     //   ps1 = correction          (root, snapped note)
     //   ps2 = correction + 7      (perfect fifth above root)
     //   ps3 = correction + 12     (octave above root)
-    const MAJOR = [0, 2, 4, 5, 7, 9, 11]   // C major scale intervals
+    // C major triad only: C(0) E(4) G(7) — 3 notes per octave.
+    // Gaps of 3–5 semitones force big jumps → stepped, mechanical vocoder sound.
+    const TRIAD = [0, 4, 7]
 
-    const snapToMajor = (semiFromA4) => {
-      const fromC  = semiFromA4 + 9       // A4 is 9st above C4
+    const snapToTriad = (semiFromA4) => {
+      const fromC  = semiFromA4 + 9
       const octave = Math.floor(fromC / 12)
-      const pos    = fromC - octave * 12  // position within octave [0,12)
+      const pos    = fromC - octave * 12
 
-      let best = MAJOR[0], bestDist = Math.abs(pos - MAJOR[0])
-      for (const n of MAJOR) {
+      let best = TRIAD[0], bestDist = Math.abs(pos - TRIAD[0])
+      for (const n of TRIAD) {
         const d = Math.abs(pos - n)
         if (d < bestDist) { bestDist = d; best = n }
       }
-      if (Math.abs(pos - 12) < bestDist) best = 12   // check next-octave C
+      if (Math.abs(pos - 12) < bestDist) best = 12   // next-octave C
 
       const targetFromA4 = (octave * 12 + best) - 9
-      return targetFromA4 - semiFromA4   // shift needed to hit the scale note
+      return targetFromA4 - semiFromA4
     }
 
     const sr = Tone.getContext().sampleRate
@@ -394,7 +396,7 @@ export default function App() {
       const data = raw instanceof Float32Array ? raw : raw[0]
       const [freq, clarity] = finnDetectorRef.current.findPitch(data, sr)
       if (clarity > 0.6 && freq > 60 && freq < 1200) {
-        lastShift = snapToMajor(12 * Math.log2(freq / 440))
+        lastShift = snapToTriad(12 * Math.log2(freq / 440))
       }
       // Drive all three voices — they stay a fifth and an octave above the root
       finnPs1Ref.current.pitch = lastShift
