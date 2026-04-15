@@ -41,6 +41,7 @@ export default function App() {
   const [finnMode,       setFinnMode]       = useState(false)
   const [finnBits,       setFinnBits]       = useState(10)    // BitCrusher depth 1–16
   const [finnWet,        setFinnWet]        = useState(0.3)   // BitCrusher wet mix 0–1
+  const [finnGain,       setFinnGain]       = useState(8)     // makeup gain 1–20
   const [finnHysteresis, setFinnHysteresis] = useState(130)   // ms before note switch
 
   // ── Crop ───────────────────────────────────────────────────────────────
@@ -109,6 +110,9 @@ export default function App() {
   useEffect(() => {
     if (finnBitcrusherRef.current) finnBitcrusherRef.current.wet.value = finnWet
   }, [finnWet])
+  useEffect(() => {
+    if (finnPs3Ref.current) finnPs3Ref.current.gain.value = finnGain
+  }, [finnGain])
 
   // Tracks
   const tracksSectionRef = useRef(null)
@@ -362,7 +366,8 @@ export default function App() {
         finnReverbRef.current = hpf   // reuse unused ref slot
 
         // Heavy makeup gain + master wet gate
-        const makeup = new Tone.Gain(8.0)
+        const makeup = new Tone.Gain(finnGain)
+        finnPs3Ref.current = makeup   // reuse unused ref slot
         const wet    = new Tone.Gain(0)
         finnGainRef.current = wet
 
@@ -547,6 +552,15 @@ export default function App() {
               onChange={e => setFinnWet(Number(e.target.value))}
             />
             <span className="finn-slider-ends"><em>dry</em><em>wet</em></span>
+          </label>
+
+          <label className="finn-slider-label">
+            <span>Gain <strong>{finnGain}×</strong></span>
+            <input type="range" min="1" max="20" step="0.5"
+              value={finnGain}
+              onChange={e => setFinnGain(Number(e.target.value))}
+            />
+            <span className="finn-slider-ends"><em>quiet</em><em>loud</em></span>
           </label>
 
           <label className="finn-slider-label">
