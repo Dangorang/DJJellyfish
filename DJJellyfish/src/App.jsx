@@ -297,37 +297,42 @@ export default function App() {
     // ── Build chain once; reuse on subsequent toggles ─────────────────────
     if (!finnUserMediaRef.current) {
       try {
-        const um = new Tone.UserMedia()
-        await um.open()
-        finnUserMediaRef.current = um
-
-        // Disable AGC/noiseSuppression so the browser doesn't fade out
-        // sustained notes or mangle musical pitches.
-        try {
-          const track = um.stream?.getAudioTracks?.()?.[0]
-          if (track) await track.applyConstraints({
+        // Request mic with ALL browser processing disabled from the very start
+        // (applyConstraints after open() is too late — AGC may already be running)
+        const rawStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false,
-          })
-        } catch (_) { /* applyConstraints unsupported — continue */ }
+          }
+        })
+        finnUserMediaRef.current = rawStream   // MediaStream — stop tracks to cleanup
 
-        // Detection tap — read only, no downstream connection
+        // Bridge raw MediaStreamSource → Tone.js via Tone.Gain.input (native GainNode)
+        // This avoids the silent-drop that happens when connecting a raw AudioNode
+        // directly to a Tone AudioNode (which wraps a different internal graph).
+        const rawCtx = Tone.getContext().rawContext
+        const rawSrc = rawCtx.createMediaStreamSource(rawStream)
+
+        const bridge = new Tone.Gain(1.0)
+        rawSrc.connect(bridge.input)   // native → native GainNode ✓
+
+        // Detection tap — waveform analyser for pitchy
         const analyser = new Tone.Analyser('waveform', 2048)
         finnAnalyserRef.current = analyser
 
-        // Single pitch-shifted voice snapped to C major triad
-        // windowSize 0.4s = stable sustained notes, no static clicks
-        const ps1 = new Tone.PitchShift({ pitch: 0, windowSize: 0.4 })
+        // windowSize 0.1s = smaller grains → snappier, harder transitions
+        // (larger window sounds smoother but sluggish — defeats hard-tuning goal)
+        const ps1 = new Tone.PitchShift({ pitch: 0, windowSize: 0.1 })
         finnPs1Ref.current = ps1
 
         // Heavy makeup gain — pitch shifting loses energy; compensate loudly
         const makeup = new Tone.Gain(8.0)
-        const wet    = new Tone.Gain(0)   // master on/off
+        const wet    = new Tone.Gain(0)   // master on/off gate
         finnGainRef.current = wet
 
-        um.connect(analyser)   // detection tap
-        um.connect(ps1)
+        bridge.connect(analyser)   // Tone.Gain → Tone.Analyser ✓
+        bridge.connect(ps1)        // Tone.Gain → Tone.PitchShift ✓
         ps1.connect(makeup)
         makeup.connect(wet)
         wet.toDestination()
@@ -389,7 +394,8 @@ export default function App() {
   useEffect(() => {
     return () => {
       cancelAnimationFrame(finnRafRef.current)
-      finnUserMediaRef.current?.close()
+      // finnUserMediaRef now holds a raw MediaStream — stop its tracks
+      finnUserMediaRef.current?.getTracks?.().forEach(t => t.stop())
       finnAnalyserRef.current?.dispose()
       finnPs1Ref.current?.dispose()
       finnPs2Ref.current?.dispose()
