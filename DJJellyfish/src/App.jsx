@@ -39,8 +39,9 @@ export default function App() {
   const [autotuneOn,  setAutotuneOn]  = useState(false)
   const [detectedNote,setDetectedNote]= useState('')
   const [finnMode,       setFinnMode]       = useState(false)
-  const [finnBits,       setFinnBits]       = useState(4)     // BitCrusher depth 1–16
-  const [finnHysteresis, setFinnHysteresis] = useState(80)    // cents before note switch
+  const [finnBits,       setFinnBits]       = useState(10)    // BitCrusher depth 1–16
+  const [finnWet,        setFinnWet]        = useState(0.3)   // BitCrusher wet mix 0–1
+  const [finnHysteresis, setFinnHysteresis] = useState(130)   // ms before note switch
 
   // ── Crop ───────────────────────────────────────────────────────────────
   const [crop, setCrop] = useState({ start: 0, end: 1 })
@@ -101,10 +102,13 @@ export default function App() {
   const finnHysteresisRef  = useRef(80)   // mirror of finnHysteresis for rAF loop
   useEffect(() => { finnModeRef.current       = finnMode       }, [finnMode])
   useEffect(() => { finnHysteresisRef.current = finnHysteresis }, [finnHysteresis])
-  // Sync bits slider → BitCrusher node live
+  // Sync sliders → BitCrusher node live
   useEffect(() => {
     if (finnBitcrusherRef.current) finnBitcrusherRef.current.bits = finnBits
   }, [finnBits])
+  useEffect(() => {
+    if (finnBitcrusherRef.current) finnBitcrusherRef.current.wet.value = finnWet
+  }, [finnWet])
 
   // Tracks
   const tracksSectionRef = useRef(null)
@@ -349,9 +353,8 @@ export default function App() {
         const ps1 = new Tone.PitchShift({ pitch: 0, windowSize: 0.03 })
         finnPs1Ref.current = ps1
 
-        // BitCrusher(4) — 4-bit depth quantization, adds 8-bit digital grit
-        // Gives the "Finn's stomach computer" lo-fi crunchy character
-        const crusher = new Tone.BitCrusher(4)
+        // BitCrusher — lo-fi grit blended via wet mix so it doesn't overwhelm
+        const crusher = new Tone.BitCrusher({ bits: finnBits, wet: finnWet })
         finnBitcrusherRef.current = crusher
 
         // High-pass filter at 150 Hz — cuts low rumble, robot speaker timbre
@@ -535,6 +538,15 @@ export default function App() {
               onChange={e => setFinnBits(Number(e.target.value))}
             />
             <span className="finn-slider-ends"><em>crushed</em><em>clean</em></span>
+          </label>
+
+          <label className="finn-slider-label">
+            <span>Crush Mix <strong>{Math.round(finnWet * 100)}%</strong></span>
+            <input type="range" min="0" max="1" step="0.01"
+              value={finnWet}
+              onChange={e => setFinnWet(Number(e.target.value))}
+            />
+            <span className="finn-slider-ends"><em>dry</em><em>wet</em></span>
           </label>
 
           <label className="finn-slider-label">
