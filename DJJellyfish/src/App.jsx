@@ -316,38 +316,19 @@ export default function App() {
         const analyser = new Tone.Analyser('waveform', 2048)
         finnAnalyserRef.current = analyser
 
-        // ── 3-voice harmonizer ─────────────────────────────────────────
-        // Voice 1: root   (snapped to C major scale)
-        // Voice 2: fifth  (root + 7 semitones)
-        // Voice 3: octave (root + 12 semitones)
-        // windowSize 0.4s = large grains → no static, stable sustained notes
-        const ps1 = new Tone.PitchShift({ pitch: 0,  windowSize: 0.4 })
-        const ps2 = new Tone.PitchShift({ pitch: 7,  windowSize: 0.4 })
-        const ps3 = new Tone.PitchShift({ pitch: 12, windowSize: 0.4 })
+        // Single pitch-shifted voice snapped to C major triad
+        // windowSize 0.4s = stable sustained notes, no static clicks
+        const ps1 = new Tone.PitchShift({ pitch: 0, windowSize: 0.4 })
         finnPs1Ref.current = ps1
-        finnPs2Ref.current = ps2
-        finnPs3Ref.current = ps3
 
-        // Per-voice gains: root full, fifth half, octave third
-        const g1 = new Tone.Gain(1.0)
-        const g2 = new Tone.Gain(0.55)
-        const g3 = new Tone.Gain(0.35)
-
-        // Lush reverb tail to glue the three voices and make it feel musical
-        const reverb = new Tone.Reverb({ decay: 2.8, wet: 0.5, preDelay: 0.02 })
-        finnReverbRef.current = reverb
-
-        // Heavy makeup gain (+12 dB) — pitch shifting loses energy; crank it up
-        const makeup = new Tone.Gain(4.0)
+        // Heavy makeup gain — pitch shifting loses energy; compensate loudly
+        const makeup = new Tone.Gain(8.0)
         const wet    = new Tone.Gain(0)   // master on/off
         finnGainRef.current = wet
 
-        // Wire it all up
-        um.connect(analyser)          // detection tap (no output)
-        um.connect(ps1); ps1.connect(g1); g1.connect(reverb)
-        um.connect(ps2); ps2.connect(g2); g2.connect(reverb)
-        um.connect(ps3); ps3.connect(g3); g3.connect(reverb)
-        reverb.connect(makeup)
+        um.connect(analyser)   // detection tap
+        um.connect(ps1)
+        ps1.connect(makeup)
         makeup.connect(wet)
         wet.toDestination()
 
@@ -398,10 +379,7 @@ export default function App() {
       if (clarity > 0.6 && freq > 60 && freq < 1200) {
         lastShift = snapToTriad(12 * Math.log2(freq / 440))
       }
-      // Drive all three voices — they stay a fifth and an octave above the root
       finnPs1Ref.current.pitch = lastShift
-      finnPs2Ref.current.pitch = lastShift + 7
-      finnPs3Ref.current.pitch = lastShift + 12
       finnRafRef.current = requestAnimationFrame(loop)
     }
     finnRafRef.current = requestAnimationFrame(loop)
