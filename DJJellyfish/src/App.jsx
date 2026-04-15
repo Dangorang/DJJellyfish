@@ -83,16 +83,14 @@ export default function App() {
   const detectorRef   = useRef(null)
   const correctionRef = useRef(0)
 
-  // Finn Party Mode — live mic pitch-quantizer chain
-  const finnStreamRef   = useRef(null)   // MediaStream
-  const finnSrcRef      = useRef(null)   // MediaStreamSourceNode
-  const finnAnalyserRef = useRef(null)   // AnalyserNode (pitch detection)
-  const finnAdaptorRef  = useRef(null)   // Tone.Gain (raw→Tone bridge)
-  const finnPsRef       = useRef(null)   // Tone.PitchShift
-  const finnGainRef     = useRef(null)   // Tone.Gain (wet, 0=off 1=on)
-  const finnDetectorRef = useRef(null)   // pitchy PitchDetector
-  const finnRafRef      = useRef(null)   // rAF loop id
-  const finnModeRef     = useRef(false)  // mirror of finnMode for callbacks
+  // Finn Party Mode — live mic pitch-quantizer chain (all Tone.js native)
+  const finnUserMediaRef = useRef(null)   // Tone.UserMedia
+  const finnAnalyserRef  = useRef(null)   // Tone.Analyser (waveform, for pitchy)
+  const finnPsRef        = useRef(null)   // Tone.PitchShift
+  const finnGainRef      = useRef(null)   // Tone.Gain (wet: 0=off, 1=on)
+  const finnDetectorRef  = useRef(null)   // pitchy PitchDetector
+  const finnRafRef       = useRef(null)   // rAF loop id
+  const finnModeRef      = useRef(false)  // mirror of finnMode for callbacks
   useEffect(() => { finnModeRef.current = finnMode }, [finnMode])
 
   // Tracks
@@ -277,6 +275,10 @@ export default function App() {
 
   // ══════════════════════════════════════════════════════════════════════════
   // FINN PARTY MODE — live mic hard-autotune
+  // Uses Tone.UserMedia so the whole chain is Tone-native (no raw AudioNode
+  // bridging that silently drops the signal).
+  // Chain: UserMedia ──► Analyser (detection tap, no output)
+  //                 └──► PitchShift ──► Gain (wet) ──► Destination
   // ══════════════════════════════════════════════════════════════════════════
   const toggleFinnMode = async () => {
     await Tone.start()
@@ -289,39 +291,28 @@ export default function App() {
       return
     }
 
-    // ── Turn on ───────────────────────────────────────────────────────────
-    // Build the signal chain once; reuse on subsequent toggles
-    if (!finnStreamRef.current) {
+    // ── Build chain once; reuse on subsequent toggles ─────────────────────
+    if (!finnUserMediaRef.current) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        finnStreamRef.current = stream
+        const um = new Tone.UserMedia()
+        await um.open()
+        finnUserMediaRef.current = um
 
-        const rawCtx = Tone.getContext().rawContext
-
-        // Analyser on the raw signal for pitch detection
-        const analyser = rawCtx.createAnalyser()
-        analyser.fftSize = 2048
+        // Waveform analyser for pitchy detection — purely a read tap, no output
+        const analyser = new Tone.Analyser('waveform', 2048)
         finnAnalyserRef.current = analyser
 
-        const src = rawCtx.createMediaStreamSource(stream)
-        finnSrcRef.current = src
-        src.connect(analyser)
+        // windowSize 0.05s = shorter grains → more robotic phasing artifacts
+        const ps  = new Tone.PitchShift({ pitch: 0, windowSize: 0.05 })
+        const wet = new Tone.Gain(0)   // starts silent; set to 1 when active
+        finnPsRef.current   = ps
+        finnGainRef.current = wet
 
-        // Tone.js chain:
-        //   src → adaptor (Tone.Gain, raw AudioNode bridge) → PitchShift → wetGain → Destination
-        // Tone.Gain.input is a native GainNode, so a raw AudioNode can connect to it directly.
-        // windowSize 0.05 = short grains → more robotic T-Pain artifacts.
-        const adaptor = new Tone.Gain(1)
-        const ps      = new Tone.PitchShift({ pitch: 0, windowSize: 0.05, delayTime: 0 })
-        const wet     = new Tone.Gain(0)   // starts muted; set to 1 when active
-        finnAdaptorRef.current = adaptor
-        finnPsRef.current      = ps
-        finnGainRef.current    = wet
-
-        src.connect(adaptor.input)   // raw MediaStreamSource → raw GainNode
-        adaptor.connect(ps)          // Tone.Gain → Tone.PitchShift
-        ps.connect(wet)              // → Tone.Gain (wet control)
-        wet.toDestination()          // → speakers
+        // Pure Tone-to-Tone connections — no raw AudioNode bridging
+        um.connect(analyser)   // detection tap (analyser has no downstream connection)
+        um.connect(ps)         // processing path
+        ps.connect(wet)
+        wet.toDestination()
 
         finnDetectorRef.current = PitchDetector.forFloat32Array(2048)
       } catch (err) {
@@ -330,48 +321,42 @@ export default function App() {
       }
     }
 
-    // Don't open speaker output while recording (would feed back into the mic)
+    // Mute during recording to prevent feedback; restored in stopRecording
     if (!isRecording) finnGainRef.current.gain.value = 1
     setFinnMode(true)
 
     // ── Pitch quantization rAF loop ──────────────────────────────────────
-    // Uses C major pentatonic grid (0,2,4,7,9 semitones from C per octave).
-    // Gaps between grid notes are 2-3 semitones, so corrections jump up to
-    // ~1.5 semitones — clearly audible vs chromatic (max 0.5 semitones).
-    // Last correction is held when clarity drops (no snap-back to 0).
-    const PENTA = [0, 2, 4, 7, 9]   // C major pentatonic intervals
+    // Snaps detected pitch to C major pentatonic (0,2,4,7,9 semitones from C).
+    // Gaps of 2-3 semitones mean corrections up to ~1.5st — clearly audible.
+    // Holds last correction between low-clarity frames (no snap-back to 0).
+    const PENTA = [0, 2, 4, 7, 9]
 
     const snapToPentatonic = (semiFromA4) => {
-      // A4 is 9 semitones above C4; work in C-relative space
-      const fromC  = semiFromA4 + 9
+      const fromC  = semiFromA4 + 9       // A4 is 9st above C4
       const octave = Math.floor(fromC / 12)
-      const pos    = fromC - octave * 12   // position within octave [0..12)
+      const pos    = fromC - octave * 12  // position within octave [0,12)
 
-      // Find nearest pentatonic note; also check next-octave C (= 12)
       let best = PENTA[0], bestDist = Math.abs(pos - PENTA[0])
       for (const n of PENTA) {
         const d = Math.abs(pos - n)
         if (d < bestDist) { bestDist = d; best = n }
       }
-      const dNextC = Math.abs(pos - 12)
-      if (dNextC < bestDist) { best = 12 }
+      if (Math.abs(pos - 12) < bestDist) best = 12   // check next-octave C
 
       const targetFromA4 = (octave * 12 + best) - 9
       return Math.max(-12, Math.min(12, targetFromA4 - semiFromA4))
     }
 
-    const buf = new Float32Array(2048)
-    const sr  = Tone.getContext().rawContext.sampleRate
-    let lastShift = 0   // holds correction between low-clarity frames
+    const sr = Tone.getContext().sampleRate
+    let lastShift = 0
 
     const loop = () => {
-      finnAnalyserRef.current.getFloatTimeDomainData(buf)
-      const [freq, clarity] = finnDetectorRef.current.findPitch(buf, sr)
+      const data = finnAnalyserRef.current.getValue()  // Float32Array via Tone.Analyser
+      const [freq, clarity] = finnDetectorRef.current.findPitch(data, sr)
       if (clarity > 0.65 && freq > 60 && freq < 1200) {
         lastShift = snapToPentatonic(12 * Math.log2(freq / 440))
       }
-      // Always apply — hold last shift so there's no snap-back to 0 mid-phrase
-      finnPsRef.current.pitch = lastShift
+      finnPsRef.current.pitch = lastShift   // hold between frames
       finnRafRef.current = requestAnimationFrame(loop)
     }
     finnRafRef.current = requestAnimationFrame(loop)
@@ -381,8 +366,8 @@ export default function App() {
   useEffect(() => {
     return () => {
       cancelAnimationFrame(finnRafRef.current)
-      finnStreamRef.current?.getTracks().forEach(t => t.stop())
-      finnAdaptorRef.current?.dispose()
+      finnUserMediaRef.current?.close()
+      finnAnalyserRef.current?.dispose()
       finnPsRef.current?.dispose()
       finnGainRef.current?.dispose()
     }
