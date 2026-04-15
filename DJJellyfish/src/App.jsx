@@ -38,7 +38,9 @@ export default function App() {
   const [treble,      setTreble]      = useState(0)
   const [autotuneOn,  setAutotuneOn]  = useState(false)
   const [detectedNote,setDetectedNote]= useState('')
-  const [finnMode,    setFinnMode]    = useState(false)
+  const [finnMode,       setFinnMode]       = useState(false)
+  const [finnBits,       setFinnBits]       = useState(4)     // BitCrusher depth 1–16
+  const [finnHysteresis, setFinnHysteresis] = useState(80)    // cents before note switch
 
   // ── Crop ───────────────────────────────────────────────────────────────
   const [crop, setCrop] = useState({ start: 0, end: 1 })
@@ -96,7 +98,13 @@ export default function App() {
   const finnDetectorRef    = useRef(null)  // pitchy PitchDetector
   const finnRafRef         = useRef(null)  // rAF loop id
   const finnModeRef        = useRef(false) // mirror of finnMode for callbacks
-  useEffect(() => { finnModeRef.current = finnMode }, [finnMode])
+  const finnHysteresisRef  = useRef(80)   // mirror of finnHysteresis for rAF loop
+  useEffect(() => { finnModeRef.current       = finnMode       }, [finnMode])
+  useEffect(() => { finnHysteresisRef.current = finnHysteresis }, [finnHysteresis])
+  // Sync bits slider → BitCrusher node live
+  useEffect(() => {
+    if (finnBitcrusherRef.current) finnBitcrusherRef.current.bits = finnBits
+  }, [finnBits])
 
   // Tracks
   const tracksSectionRef = useRef(null)
@@ -389,7 +397,8 @@ export default function App() {
 
     const sr            = Tone.getContext().sampleRate
     const PENTA         = [0, 2, 4, 7, 9]  // C major pentatonic note classes (0=C)
-    const MIN_BLOCK_MS  = 80               // minimum ms between note changes
+    // MIN_BLOCK_MS read from ref each frame so slider updates take effect live
+    const getBlockMs = () => finnHysteresisRef.current
 
     let lastSnappedMidi = null
     let lastChangeTime  = 0
@@ -418,7 +427,7 @@ export default function App() {
 
         // Block gate: only update when note has CHANGED and MIN_BLOCK_MS elapsed.
         // This is what forces the chunky, discrete-step character.
-        if (snappedMidi !== lastSnappedMidi && now - lastChangeTime > MIN_BLOCK_MS) {
+        if (snappedMidi !== lastSnappedMidi && now - lastChangeTime > getBlockMs()) {
           // Hard instantaneous assignment — never rampTo, never interpolate.
           finnPs1Ref.current.pitch = snappedMidi - detectedMidi
           lastSnappedMidi = snappedMidi
@@ -516,6 +525,26 @@ export default function App() {
               ? '🔵 Hard auto-tune active — speak or sing into your mic'
               : 'Real-time pitch snap to nearest semitone (use headphones)'}
           </p>
+        </div>
+
+        <div className="finn-sliders">
+          <label className="finn-slider-label">
+            <span>Bit Crush <strong>{finnBits}-bit</strong></span>
+            <input type="range" min="1" max="16" step="1"
+              value={finnBits}
+              onChange={e => setFinnBits(Number(e.target.value))}
+            />
+            <span className="finn-slider-ends"><em>crushed</em><em>clean</em></span>
+          </label>
+
+          <label className="finn-slider-label">
+            <span>Note Lock <strong>{finnHysteresis}ms</strong></span>
+            <input type="range" min="20" max="500" step="10"
+              value={finnHysteresis}
+              onChange={e => setFinnHysteresis(Number(e.target.value))}
+            />
+            <span className="finn-slider-ends"><em>jumpy</em><em>sticky</em></span>
+          </label>
         </div>
       </div>
 

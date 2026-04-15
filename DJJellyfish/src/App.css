@@ -660,6 +660,40 @@ input[type='range']::-moz-range-thumb {
   text-align: center;
 }
 
+.finn-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+  width: 100%;
+  max-width: 340px;
+}
+
+.finn-slider-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  color: rgba(160, 230, 255, 0.75);
+}
+
+.finn-slider-label strong {
+  color: #67e8f9;
+}
+
+.finn-slider-label input[type="range"] {
+  width: 100%;
+  accent-color: #06b6d4;
+  cursor: pointer;
+}
+
+.finn-slider-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: rgba(160, 230, 255, 0.35);
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    Segment Editor
    ═══════════════════════════════════════════════════════════════════ */
