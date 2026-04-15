@@ -321,10 +321,15 @@ export default function App() {
         const analyser = new Tone.Analyser('waveform', 2048)
         finnAnalyserRef.current = analyser
 
-        // windowSize 0.1s = smaller grains → snappier, harder transitions
-        // (larger window sounds smoother but sluggish — defeats hard-tuning goal)
-        const ps1 = new Tone.PitchShift({ pitch: 0, windowSize: 0.1 })
+        // windowSize 0.03s = tiny grains → fastest possible pitch response
+        // Smaller = more instantaneous transitions, larger = smoother but sluggish
+        const ps1 = new Tone.PitchShift({ pitch: 0, windowSize: 0.03 })
         finnPs1Ref.current = ps1
+
+        // High-pass filter at 150 Hz — cuts low rumble, gives processed
+        // 'robot speaker' timbre (per Adventure Time Finn stomach-computer ref)
+        const hpf    = new Tone.Filter(150, 'highpass')
+        finnReverbRef.current = hpf   // reuse unused ref slot
 
         // Heavy makeup gain — pitch shifting loses energy; compensate loudly
         const makeup = new Tone.Gain(8.0)
@@ -333,7 +338,8 @@ export default function App() {
 
         bridge.connect(analyser)   // Tone.Gain → Tone.Analyser ✓
         bridge.connect(ps1)        // Tone.Gain → Tone.PitchShift ✓
-        ps1.connect(makeup)
+        ps1.connect(hpf)
+        hpf.connect(makeup)
         makeup.connect(wet)
         wet.toDestination()
 
@@ -348,43 +354,53 @@ export default function App() {
     if (!isRecording) finnGainRef.current.gain.value = 1
     setFinnMode(true)
 
-    // ── Pitch quantization + harmonizer rAF loop ─────────────────────────
-    // Snaps voice to C major scale (7 notes — more choices, smoother movement)
-    // then sets all 3 PitchShifts so they stay harmonically locked:
-    //   ps1 = correction          (root, snapped note)
-    //   ps2 = correction + 7      (perfect fifth above root)
-    //   ps3 = correction + 12     (octave above root)
-    // C major triad only: C(0) E(4) G(7) — 3 notes per octave.
-    // Gaps of 3–5 semitones force big jumps → stepped, mechanical vocoder sound.
-    const TRIAD = [0, 4, 7]
+    // ── Discrete-step pitch quantization ─────────────────────────────────
+    // Key insight: Tone.PitchShift cross-fades its internal grain buffers,
+    // so continuously updating pitch every frame causes smooth slides even
+    // with "instant" assignment. The fix: treat notes as discrete blocks —
+    // only fire a pitch change when the note has genuinely changed AND a
+    // minimum block duration has elapsed. The shifter's buffers never see
+    // a mid-frame drift — every update is a clean jump to a new value.
 
-    const snapToTriad = (semiFromA4) => {
-      const fromC  = semiFromA4 + 9
-      const octave = Math.floor(fromC / 12)
-      const pos    = fromC - octave * 12
+    const sr            = Tone.getContext().sampleRate
+    const PENTA         = [0, 2, 4, 7, 9]  // C major pentatonic note classes (0=C)
+    const MIN_BLOCK_MS  = 80               // minimum ms between note changes
 
-      let best = TRIAD[0], bestDist = Math.abs(pos - TRIAD[0])
-      for (const n of TRIAD) {
-        const d = Math.abs(pos - n)
-        if (d < bestDist) { bestDist = d; best = n }
-      }
-      if (Math.abs(pos - 12) < bestDist) best = 12   // next-octave C
-
-      const targetFromA4 = (octave * 12 + best) - 9
-      return targetFromA4 - semiFromA4
-    }
-
-    const sr = Tone.getContext().sampleRate
-    let lastShift = 0
+    let lastSnappedMidi = null
+    let lastChangeTime  = 0
 
     const loop = () => {
+      const now  = performance.now()
       const raw  = finnAnalyserRef.current.getValue()
       const data = raw instanceof Float32Array ? raw : raw[0]
       const [freq, clarity] = finnDetectorRef.current.findPitch(data, sr)
-      if (clarity > 0.6 && freq > 60 && freq < 1200) {
-        lastShift = snapToTriad(12 * Math.log2(freq / 440))
+
+      if (clarity > 0.8 && freq > 50 && freq < 1200) {
+        const detectedMidi = 12 * Math.log2(freq / 440) + 69
+
+        // Snap to nearest C major pentatonic degree in MIDI space
+        const roundedMidi  = Math.round(detectedMidi)
+        const noteClass    = ((roundedMidi % 12) + 12) % 12  // 0=C … 11=B, always +ve
+        const octaveBase   = roundedMidi - noteClass
+
+        let snappedClass = PENTA.reduce((best, n) =>
+          Math.abs(n - noteClass) < Math.abs(best - noteClass) ? n : best
+        )
+        // Check if next-octave C is closer
+        if (Math.abs(12 - noteClass) < Math.abs(snappedClass - noteClass)) snappedClass = 12
+
+        const snappedMidi = octaveBase + snappedClass
+
+        // Block gate: only update when note has CHANGED and MIN_BLOCK_MS elapsed.
+        // This is what forces the chunky, discrete-step character.
+        if (snappedMidi !== lastSnappedMidi && now - lastChangeTime > MIN_BLOCK_MS) {
+          // Hard instantaneous assignment — never rampTo, never interpolate.
+          finnPs1Ref.current.pitch = snappedMidi - detectedMidi
+          lastSnappedMidi = snappedMidi
+          lastChangeTime  = now
+        }
       }
-      finnPs1Ref.current.pitch = lastShift
+
       finnRafRef.current = requestAnimationFrame(loop)
     }
     finnRafRef.current = requestAnimationFrame(loop)
