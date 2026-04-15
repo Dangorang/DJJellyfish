@@ -310,8 +310,9 @@ export default function App() {
         // Tone.js chain:
         //   src → adaptor (Tone.Gain, raw AudioNode bridge) → PitchShift → wetGain → Destination
         // Tone.Gain.input is a native GainNode, so a raw AudioNode can connect to it directly.
+        // windowSize 0.05 = short grains → more robotic T-Pain artifacts.
         const adaptor = new Tone.Gain(1)
-        const ps      = new Tone.PitchShift(0)
+        const ps      = new Tone.PitchShift({ pitch: 0, windowSize: 0.05, delayTime: 0 })
         const wet     = new Tone.Gain(0)   // starts muted; set to 1 when active
         finnAdaptorRef.current = adaptor
         finnPsRef.current      = ps
@@ -334,22 +335,43 @@ export default function App() {
     setFinnMode(true)
 
     // ── Pitch quantization rAF loop ──────────────────────────────────────
-    // Detects fundamental freq every frame; snaps pitch to nearest semitone
-    // by setting PitchShift.pitch = (nearest_semi - detected_semi).
-    const buf      = new Float32Array(2048)
-    const sr       = Tone.getContext().rawContext.sampleRate
+    // Uses C major pentatonic grid (0,2,4,7,9 semitones from C per octave).
+    // Gaps between grid notes are 2-3 semitones, so corrections jump up to
+    // ~1.5 semitones — clearly audible vs chromatic (max 0.5 semitones).
+    // Last correction is held when clarity drops (no snap-back to 0).
+    const PENTA = [0, 2, 4, 7, 9]   // C major pentatonic intervals
+
+    const snapToPentatonic = (semiFromA4) => {
+      // A4 is 9 semitones above C4; work in C-relative space
+      const fromC  = semiFromA4 + 9
+      const octave = Math.floor(fromC / 12)
+      const pos    = fromC - octave * 12   // position within octave [0..12)
+
+      // Find nearest pentatonic note; also check next-octave C (= 12)
+      let best = PENTA[0], bestDist = Math.abs(pos - PENTA[0])
+      for (const n of PENTA) {
+        const d = Math.abs(pos - n)
+        if (d < bestDist) { bestDist = d; best = n }
+      }
+      const dNextC = Math.abs(pos - 12)
+      if (dNextC < bestDist) { best = 12 }
+
+      const targetFromA4 = (octave * 12 + best) - 9
+      return Math.max(-12, Math.min(12, targetFromA4 - semiFromA4))
+    }
+
+    const buf = new Float32Array(2048)
+    const sr  = Tone.getContext().rawContext.sampleRate
+    let lastShift = 0   // holds correction between low-clarity frames
+
     const loop = () => {
       finnAnalyserRef.current.getFloatTimeDomainData(buf)
       const [freq, clarity] = finnDetectorRef.current.findPitch(buf, sr)
-      if (clarity > 0.75 && freq > 60 && freq < 1200) {
-        const semiFromA4 = 12 * Math.log2(freq / 440)
-        const nearest    = Math.round(semiFromA4)
-        const shift      = Math.max(-12, Math.min(12, nearest - semiFromA4))
-        finnPsRef.current.pitch = shift
-      } else {
-        // No clear pitch — pass through unshifted
-        finnPsRef.current.pitch = 0
+      if (clarity > 0.65 && freq > 60 && freq < 1200) {
+        lastShift = snapToPentatonic(12 * Math.log2(freq / 440))
       }
+      // Always apply — hold last shift so there's no snap-back to 0 mid-phrase
+      finnPsRef.current.pitch = lastShift
       finnRafRef.current = requestAnimationFrame(loop)
     }
     finnRafRef.current = requestAnimationFrame(loop)
