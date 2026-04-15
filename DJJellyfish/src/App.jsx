@@ -38,6 +38,7 @@ export default function App() {
   const [treble,      setTreble]      = useState(0)
   const [autotuneOn,  setAutotuneOn]  = useState(false)
   const [detectedNote,setDetectedNote]= useState('')
+  const [finnMode,    setFinnMode]    = useState(false)
 
   // ── Crop ───────────────────────────────────────────────────────────────
   const [crop, setCrop] = useState({ start: 0, end: 1 })
@@ -78,9 +79,21 @@ export default function App() {
     return () => window.removeEventListener('scroll', onScroll)
   }, [])
 
-  // Autotune
+  // Autotune (playback)
   const detectorRef   = useRef(null)
   const correctionRef = useRef(0)
+
+  // Finn Party Mode — live mic pitch-quantizer chain
+  const finnStreamRef   = useRef(null)   // MediaStream
+  const finnSrcRef      = useRef(null)   // MediaStreamSourceNode
+  const finnAnalyserRef = useRef(null)   // AnalyserNode (pitch detection)
+  const finnAdaptorRef  = useRef(null)   // Tone.Gain (raw→Tone bridge)
+  const finnPsRef       = useRef(null)   // Tone.PitchShift
+  const finnGainRef     = useRef(null)   // Tone.Gain (wet, 0=off 1=on)
+  const finnDetectorRef = useRef(null)   // pitchy PitchDetector
+  const finnRafRef      = useRef(null)   // rAF loop id
+  const finnModeRef     = useRef(false)  // mirror of finnMode for callbacks
+  useEffect(() => { finnModeRef.current = finnMode }, [finnMode])
 
   // Tracks
   const tracksSectionRef = useRef(null)
@@ -126,6 +139,9 @@ export default function App() {
         setWaveformData(buildStaticWaveform(buf))
       }
 
+      // Silence finn monitoring while recording to prevent feedback
+      if (finnGainRef.current) finnGainRef.current.gain.value = 0
+
       rec.start(100)
       setIsRecording(true)
     } catch (err) {
@@ -137,6 +153,8 @@ export default function App() {
     if (mediaRecRef.current?.state !== 'inactive') mediaRecRef.current?.stop()
     streamRef.current?.getTracks().forEach(t => t.stop())
     setIsRecording(false)
+    // Restore finn monitoring now that recording mic is closed
+    if (finnModeRef.current && finnGainRef.current) finnGainRef.current.gain.value = 1
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -257,6 +275,97 @@ export default function App() {
     return () => cancelAnimationFrame(playRafRef.current)
   }, [isPlaying])
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // FINN PARTY MODE — live mic hard-autotune
+  // ══════════════════════════════════════════════════════════════════════════
+  const toggleFinnMode = async () => {
+    await Tone.start()
+
+    if (finnModeRef.current) {
+      // ── Turn off ──────────────────────────────────────────────────────
+      cancelAnimationFrame(finnRafRef.current)
+      if (finnGainRef.current) finnGainRef.current.gain.value = 0
+      setFinnMode(false)
+      return
+    }
+
+    // ── Turn on ───────────────────────────────────────────────────────────
+    // Build the signal chain once; reuse on subsequent toggles
+    if (!finnStreamRef.current) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        finnStreamRef.current = stream
+
+        const rawCtx = Tone.getContext().rawContext
+
+        // Analyser on the raw signal for pitch detection
+        const analyser = rawCtx.createAnalyser()
+        analyser.fftSize = 2048
+        finnAnalyserRef.current = analyser
+
+        const src = rawCtx.createMediaStreamSource(stream)
+        finnSrcRef.current = src
+        src.connect(analyser)
+
+        // Tone.js chain:
+        //   src → adaptor (Tone.Gain, raw AudioNode bridge) → PitchShift → wetGain → Destination
+        // Tone.Gain.input is a native GainNode, so a raw AudioNode can connect to it directly.
+        const adaptor = new Tone.Gain(1)
+        const ps      = new Tone.PitchShift(0)
+        const wet     = new Tone.Gain(0)   // starts muted; set to 1 when active
+        finnAdaptorRef.current = adaptor
+        finnPsRef.current      = ps
+        finnGainRef.current    = wet
+
+        src.connect(adaptor.input)   // raw MediaStreamSource → raw GainNode
+        adaptor.connect(ps)          // Tone.Gain → Tone.PitchShift
+        ps.connect(wet)              // → Tone.Gain (wet control)
+        wet.toDestination()          // → speakers
+
+        finnDetectorRef.current = PitchDetector.forFloat32Array(2048)
+      } catch (err) {
+        alert('Microphone access denied for Finn Party Mode.\n' + err.message)
+        return
+      }
+    }
+
+    // Don't open speaker output while recording (would feed back into the mic)
+    if (!isRecording) finnGainRef.current.gain.value = 1
+    setFinnMode(true)
+
+    // ── Pitch quantization rAF loop ──────────────────────────────────────
+    // Detects fundamental freq every frame; snaps pitch to nearest semitone
+    // by setting PitchShift.pitch = (nearest_semi - detected_semi).
+    const buf      = new Float32Array(2048)
+    const sr       = Tone.getContext().rawContext.sampleRate
+    const loop = () => {
+      finnAnalyserRef.current.getFloatTimeDomainData(buf)
+      const [freq, clarity] = finnDetectorRef.current.findPitch(buf, sr)
+      if (clarity > 0.75 && freq > 60 && freq < 1200) {
+        const semiFromA4 = 12 * Math.log2(freq / 440)
+        const nearest    = Math.round(semiFromA4)
+        const shift      = Math.max(-12, Math.min(12, nearest - semiFromA4))
+        finnPsRef.current.pitch = shift
+      } else {
+        // No clear pitch — pass through unshifted
+        finnPsRef.current.pitch = 0
+      }
+      finnRafRef.current = requestAnimationFrame(loop)
+    }
+    finnRafRef.current = requestAnimationFrame(loop)
+  }
+
+  // Cleanup finn chain on unmount
+  useEffect(() => {
+    return () => {
+      cancelAnimationFrame(finnRafRef.current)
+      finnStreamRef.current?.getTracks().forEach(t => t.stop())
+      finnAdaptorRef.current?.dispose()
+      finnPsRef.current?.dispose()
+      finnGainRef.current?.dispose()
+    }
+  }, [])
+
   // ── Live waveform data ─────────────────────────────────────────────────
   const getWaveformData = useCallback(() => {
     if (isRecording && recAnalyserRef.current) {
@@ -314,6 +423,21 @@ export default function App() {
         ) : (
           <p className="empty-hint">Hit record to get started</p>
         )}
+
+        {/* Finn Party Mode — always visible, works on live mic */}
+        <div className="finn-row">
+          <button
+            className={`finn-btn ${finnMode ? 'on' : ''}`}
+            onClick={toggleFinnMode}
+          >
+            🎤 Finn Party Mode
+          </button>
+          <p className="finn-hint">
+            {finnMode
+              ? '🔵 Hard auto-tune active — speak or sing into your mic'
+              : 'Real-time pitch snap to nearest semitone (use headphones)'}
+          </p>
+        </div>
       </div>
 
       {/* Multi-track mixer — always visible */}

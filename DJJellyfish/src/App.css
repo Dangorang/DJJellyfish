@@ -608,6 +608,59 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   Finn Party Mode
+   ═══════════════════════════════════════════════════════════════════ */
+.finn-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid rgba(0, 200, 255, 0.08);
+  margin-top: 0.25rem;
+  width: 100%;
+}
+
+.finn-btn {
+  padding: 0.7rem 1.8rem;
+  border-radius: 999px;
+  border: 2px solid rgba(0, 210, 255, 0.45);
+  background: transparent;
+  color: #67e8f9;
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, color 0.2s;
+}
+.finn-btn:hover {
+  background: rgba(0, 200, 255, 0.1);
+  border-color: rgba(0, 210, 255, 0.7);
+}
+.finn-btn.on {
+  background: linear-gradient(135deg, #0891b2, #06b6d4);
+  border-color: transparent;
+  color: #fff;
+  animation: finnGlow 1.6s ease-in-out infinite;
+}
+@keyframes finnGlow {
+  0%, 100% {
+    box-shadow: 0 0 16px rgba(0, 210, 255, 0.55),
+                0 0 40px rgba(0, 210, 255, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 32px rgba(0, 210, 255, 1),
+                0 0 70px rgba(0, 210, 255, 0.4);
+  }
+}
+
+.finn-hint {
+  font-size: 0.72rem;
+  color: rgba(160, 230, 255, 0.4);
+  text-align: center;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    Segment Editor
    ═══════════════════════════════════════════════════════════════════ */
 .seg-editor {
